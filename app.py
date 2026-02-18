@@ -5,11 +5,14 @@ Flask + LINE Messaging API v3
 """
 
 import os
+import io
 import json
 import uuid
 import logging
 import traceback
-from datetime import datetime
+import calendar
+import requests as http_requests
+from datetime import datetime, timedelta, date
 
 from flask import Flask, request, abort, send_from_directory, jsonify
 from linebot.v3 import WebhookHandler
@@ -39,6 +42,7 @@ from linebot.v3.webhooks import (
 from linebot.v3.exceptions import InvalidSignatureError
 
 from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont
 
 # ─── ログ設定 ───
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -51,6 +55,10 @@ CHANNEL_ACCESS_TOKEN = os.environ.get(
     "6cPZ0W6arhy1odKsdbt1U5o0AjQ2WxiDtw7qIwrK2IVDBWnhaYl+GYyjvZpoGz/v6Yc+idHkYsyFqQ2DjpmoS7L5F8PUdOxoDJwLha01/JfD7t0bn7WGrO0d6Ic+L8bPUpAEDCbYrgI2UDqQiaXokQdB04t89/1O/w1cDnyilFU=",
 )
 ADMIN_USER_ID = os.environ.get("LINE_ADMIN_USER_ID", "U485fac63c62459cb069c64a1a9846595")
+
+# Notion API
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "256f9507f0cf8076931fed70fc040520")
 
 # ─── Flask ───
 app = Flask(__name__)
@@ -82,9 +90,350 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "static", "images")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ─── BASE_URL（トンネル公開後に設定） ───
-BASE_URL = os.environ.get("BASE_URL", "")
+BASE_URL = os.environ.get("BASE_URL", "https://zenryoku-line-bot-production.up.railway.app")
 
-# ─── ヘルスチェック ───
+# ─── セラピスト色分け ───
+THERAPIST_COLORS = [
+    "#FF6B9D",  # ピンク
+    "#C084FC",  # パープル
+    "#60A5FA",  # ブルー
+    "#34D399",  # グリーン
+    "#FBBF24",  # イエロー
+    "#FB923C",  # オレンジ
+    "#F87171",  # レッド
+    "#A78BFA",  # バイオレット
+    "#2DD4BF",  # ティール
+    "#E879F9",  # マゼンタ
+    "#FCA5A5",  # ライトレッド
+    "#86EFAC",  # ライトグリーン
+    "#93C5FD",  # ライトブルー
+    "#FDE68A",  # ライトイエロー
+    "#FDBA74",  # ライトオレンジ
+]
+
+
+# ═══════════════════════════════════════════
+#  Notion API連携
+# ═══════════════════════════════════════════
+
+def fetch_shift_data_from_notion(year, month):
+    """NotionのシフトDBから指定月のシフトデータを取得"""
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY is not set")
+        return []
+
+    # 月の初日と翌月の初日を計算
+    first_day = date(year, month, 1)
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
+    else:
+        next_month_first = date(year, month + 1, 1)
+
+    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    # 日付フィルター: 月の範囲内のシフトを取得
+    # start日付が月末以前 AND (start日付が月初以降 OR end日付が月初以降)
+    payload = {
+        "filter": {
+            "and": [
+                {
+                    "property": "日付",
+                    "date": {
+                        "on_or_before": (next_month_first - timedelta(days=1)).isoformat()
+                    }
+                },
+                {
+                    "property": "日付",
+                    "date": {
+                        "on_or_after": first_day.isoformat()
+                    }
+                }
+            ]
+        },
+        "page_size": 100,
+    }
+
+    all_results = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        try:
+            resp = http_requests.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for page in data.get("results", []):
+                props = page.get("properties", {})
+
+                # タイトル（セラピスト名）
+                title_prop = props.get("タイトル", {})
+                title_arr = title_prop.get("title", [])
+                therapist_name = title_arr[0]["plain_text"] if title_arr else ""
+
+                # 日付
+                date_prop = props.get("日付", {})
+                date_obj = date_prop.get("date", {})
+                if not date_obj:
+                    continue
+                start_date = date_obj.get("start", "")
+                end_date = date_obj.get("end", "")
+
+                # 条件（出勤時間帯）
+                condition_prop = props.get("条件", {})
+                rich_text = condition_prop.get("rich_text", [])
+                condition = rich_text[0]["plain_text"] if rich_text else ""
+
+                # ルーム
+                room_prop = props.get("ルーム", {})
+                room_select = room_prop.get("select", {})
+                room = room_select.get("name", "") if room_select else ""
+
+                all_results.append({
+                    "therapist": therapist_name,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "condition": condition,
+                    "room": room,
+                })
+
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+
+        except Exception as e:
+            logger.error(f"Notion API error: {e}\n{traceback.format_exc()}")
+            break
+
+    return all_results
+
+
+def parse_shift_to_calendar(shift_data, year, month):
+    """シフトデータをカレンダー形式に変換
+    戻り値: {day: [{"name": セラピスト名, "condition": 時間帯}, ...]}
+    """
+    cal_data = {}
+    num_days = calendar.monthrange(year, month)[1]
+
+    for shift in shift_data:
+        name = shift["therapist"]
+        condition = shift["condition"]
+        start_str = shift["start_date"]
+        end_str = shift["end_date"]
+
+        if not start_str:
+            continue
+
+        try:
+            start_d = date.fromisoformat(start_str)
+        except ValueError:
+            continue
+
+        if end_str:
+            try:
+                end_d = date.fromisoformat(end_str)
+            except ValueError:
+                end_d = start_d
+        else:
+            end_d = start_d
+
+        # 日付範囲をループ
+        current = start_d
+        while current <= end_d:
+            if current.year == year and current.month == month:
+                day = current.day
+                if day not in cal_data:
+                    cal_data[day] = []
+                cal_data[day].append({
+                    "name": name,
+                    "condition": condition,
+                })
+            current += timedelta(days=1)
+
+    return cal_data
+
+
+def generate_calendar_image(year, month, cal_data):
+    """Pillowでカレンダー画像を生成（ダークテーマ）"""
+
+    # フォント設定
+    try:
+        font_title = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 36)
+        font_day_header = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 20)
+        font_day_num = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 18)
+        font_name = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 13)
+        font_legend = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 14)
+    except Exception as e:
+        logger.warning(f"Font loading error: {e}, using default")
+        font_title = ImageFont.load_default()
+        font_day_header = ImageFont.load_default()
+        font_day_num = ImageFont.load_default()
+        font_name = ImageFont.load_default()
+        font_legend = ImageFont.load_default()
+
+    # カレンダー情報
+    num_days = calendar.monthrange(year, month)[1]
+    first_weekday = calendar.monthrange(year, month)[0]  # 0=月曜
+    # 日曜始まりに変換
+    first_weekday_sun = (first_weekday + 1) % 7
+    total_cells = first_weekday_sun + num_days
+    num_rows = (total_cells + 6) // 7
+
+    # セラピスト名のユニークリストと色マッピング
+    all_therapists = set()
+    for day_shifts in cal_data.values():
+        for s in day_shifts:
+            all_therapists.add(s["name"])
+    therapist_list = sorted(all_therapists)
+    therapist_color_map = {}
+    for i, name in enumerate(therapist_list):
+        therapist_color_map[name] = THERAPIST_COLORS[i % len(THERAPIST_COLORS)]
+
+    # 画像サイズ計算
+    cell_w = 150
+    cell_h = 110
+    header_h = 80
+    day_header_h = 35
+    legend_h = max(60, 30 + ((len(therapist_list) + 4) // 5) * 28)
+    padding = 15
+    img_w = cell_w * 7 + padding * 2
+    img_h = header_h + day_header_h + cell_h * num_rows + legend_h + padding * 2
+
+    # ダークテーマカラー
+    bg_color = "#1a1a2e"
+    cell_bg = "#16213e"
+    cell_border = "#0f3460"
+    today_bg = "#e94560"
+    today_border = "#ff6b6b"
+    text_white = "#ffffff"
+    text_gray = "#a0a0a0"
+    sat_color = "#60A5FA"
+    sun_color = "#F87171"
+    header_bg = "#0f3460"
+
+    img = Image.new("RGB", (img_w, img_h), bg_color)
+    draw = ImageDraw.Draw(img)
+
+    # ヘッダー背景
+    draw.rectangle([0, 0, img_w, header_h], fill=header_bg)
+
+    # タイトル
+    title_text = f"{year}年{month}月 シフトカレンダー"
+    bbox = draw.textbbox((0, 0), title_text, font=font_title)
+    tw = bbox[2] - bbox[0]
+    draw.text(((img_w - tw) // 2, 20), title_text, fill="#f0e6d3", font=font_title)
+
+    # 曜日ヘッダー
+    weekdays = ["日", "月", "火", "水", "木", "金", "土"]
+    y_start = header_h
+    for i, wd in enumerate(weekdays):
+        x = padding + i * cell_w
+        # 曜日ヘッダー背景
+        draw.rectangle([x, y_start, x + cell_w - 1, y_start + day_header_h], fill="#0a1628")
+        bbox = draw.textbbox((0, 0), wd, font=font_day_header)
+        tw = bbox[2] - bbox[0]
+        if i == 0:  # 日曜
+            color = sun_color
+        elif i == 6:  # 土曜
+            color = sat_color
+        else:
+            color = text_white
+        draw.text((x + (cell_w - tw) // 2, y_start + 7), wd, fill=color, font=font_day_header)
+
+    # 今日の日付
+    today = date.today()
+
+    # カレンダーセル描画
+    y_base = header_h + day_header_h
+    for day in range(1, num_days + 1):
+        cell_index = first_weekday_sun + day - 1
+        col = cell_index % 7
+        row = cell_index // 7
+
+        x = padding + col * cell_w
+        y = y_base + row * cell_h
+
+        # 今日のハイライト
+        is_today = (year == today.year and month == today.month and day == today.day)
+
+        if is_today:
+            draw.rectangle([x + 1, y + 1, x + cell_w - 2, y + cell_h - 2], fill="#2a1a3e", outline=today_border, width=2)
+        else:
+            draw.rectangle([x + 1, y + 1, x + cell_w - 2, y + cell_h - 2], fill=cell_bg, outline=cell_border, width=1)
+
+        # 日付番号
+        day_str = str(day)
+        if col == 0:  # 日曜
+            day_color = sun_color
+        elif col == 6:  # 土曜
+            day_color = sat_color
+        else:
+            day_color = text_white
+
+        if is_today:
+            # 今日の日付は丸背景
+            bbox = draw.textbbox((0, 0), day_str, font=font_day_num)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            circle_r = max(tw, th) // 2 + 5
+            cx = x + 18
+            cy = y + 16
+            draw.ellipse([cx - circle_r, cy - circle_r, cx + circle_r, cy + circle_r], fill=today_bg)
+            draw.text((cx - tw // 2, cy - th // 2 - 2), day_str, fill=text_white, font=font_day_num)
+        else:
+            draw.text((x + 6, y + 4), day_str, fill=day_color, font=font_day_num)
+
+        # シフト情報
+        shifts = cal_data.get(day, [])
+        name_y = y + 28
+        max_display = 5  # 最大表示数
+        for idx, shift in enumerate(shifts[:max_display]):
+            name = shift["name"]
+            color = therapist_color_map.get(name, "#ffffff")
+            # 名前の短縮表示（セル幅に収まるように）
+            display_name = name
+            if len(display_name) > 5:
+                display_name = display_name[:4] + ".."
+            draw.text((x + 6, name_y), display_name, fill=color, font=font_name)
+            name_y += 16
+            if name_y > y + cell_h - 8:
+                break
+
+        if len(shifts) > max_display:
+            draw.text((x + 6, name_y), f"+{len(shifts) - max_display}名", fill=text_gray, font=font_name)
+
+    # 凡例（レジェンド）
+    legend_y = y_base + num_rows * cell_h + 10
+    draw.rectangle([padding, legend_y, img_w - padding, legend_y + legend_h - 10], fill="#0a1628", outline=cell_border)
+    draw.text((padding + 10, legend_y + 6), "■ セラピスト凡例", fill=text_white, font=font_legend)
+
+    legend_x = padding + 10
+    legend_item_y = legend_y + 30
+    col_width = (img_w - padding * 2 - 20) // 5
+
+    for i, name in enumerate(therapist_list):
+        col_idx = i % 5
+        row_idx = i // 5
+        lx = legend_x + col_idx * col_width
+        ly = legend_item_y + row_idx * 24
+        color = therapist_color_map[name]
+        draw.rectangle([lx, ly + 2, lx + 12, ly + 14], fill=color)
+        draw.text((lx + 16, ly), name, fill=color, font=font_legend)
+
+    return img
+
+
+# ═══════════════════════════════════════════
+#  ヘルスチェック
+# ═══════════════════════════════════════════
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({"status": "ok", "bot": "全力エステ LINE Bot"})
@@ -604,30 +953,18 @@ def build_news_post_flex(news_data, image_urls=None):
 
 
 # ═══════════════════════════════════════════
-#  スケジュール
+#  スケジュール確認（月選択Flex）
 # ═══════════════════════════════════════════
 
-def build_schedule_flex():
-    """スケジュール確認のFlex Message（ダミー）"""
-    today = datetime.now().strftime("%Y年%m月%d日")
-    therapists = SHOP_INFO["therapists"]
-
-    schedule_rows = []
-    # ダミースケジュール
-    times = ["12:00-22:00", "13:00-21:00", "14:00-23:00", "12:00-20:00",
-             "15:00-22:00", "13:00-22:00", "12:00-21:00", "14:00-22:00", "13:00-23:00"]
-
-    for i, t in enumerate(therapists):
-        schedule_rows.append({
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {"type": "text", "text": t, "size": "sm", "color": "#1a1a2e", "weight": "bold", "flex": 3},
-                {"type": "text", "text": times[i % len(times)], "size": "sm", "color": "#666666", "flex": 4},
-                {"type": "text", "text": "◎", "size": "sm", "color": "#27ae60", "align": "center", "flex": 1}
-            ],
-            "margin": "md"
-        })
+def build_schedule_month_select_flex():
+    """スケジュール確認: 今月/来月の選択Flex Message"""
+    now = datetime.now()
+    this_month = now.strftime("%Y年%m月")
+    if now.month == 12:
+        next_month_dt = now.replace(year=now.year + 1, month=1, day=1)
+    else:
+        next_month_dt = now.replace(month=now.month + 1, day=1)
+    next_month = next_month_dt.strftime("%Y年%m月")
 
     flex_json = {
         "type": "bubble",
@@ -638,19 +975,11 @@ def build_schedule_flex():
             "contents": [
                 {
                     "type": "text",
-                    "text": "📅 本日のスケジュール",
+                    "text": "📅 スケジュール確認",
                     "weight": "bold",
                     "size": "lg",
                     "color": "#1a1a2e",
                     "align": "center"
-                },
-                {
-                    "type": "text",
-                    "text": today,
-                    "size": "xs",
-                    "color": "#666666",
-                    "align": "center",
-                    "margin": "sm"
                 }
             ],
             "backgroundColor": "#f0e6d3",
@@ -661,17 +990,41 @@ def build_schedule_flex():
             "layout": "vertical",
             "contents": [
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "セラピスト", "size": "xs", "color": "#888888", "weight": "bold", "flex": 3},
-                        {"type": "text", "text": "出勤時間", "size": "xs", "color": "#888888", "weight": "bold", "flex": 4},
-                        {"type": "text", "text": "空き", "size": "xs", "color": "#888888", "weight": "bold", "align": "center", "flex": 1}
-                    ]
+                    "type": "text",
+                    "text": "確認したい月を選択してください",
+                    "size": "sm",
+                    "color": "#888888",
+                    "align": "center",
+                    "margin": "md"
                 },
-                {"type": "separator", "margin": "sm"},
-                *schedule_rows,
-                {"type": "separator", "margin": "lg"},
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": f"📅 今月（{this_month}）",
+                        "text": "スケジュール_今月"
+                    },
+                    "style": "primary",
+                    "color": "#1a1a2e",
+                    "height": "sm",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": f"📅 来月（{next_month}）",
+                        "text": "スケジュール_来月"
+                    },
+                    "style": "primary",
+                    "color": "#0f3460",
+                    "height": "sm",
+                    "margin": "sm"
+                },
                 {
                     "type": "button",
                     "action": {
@@ -688,9 +1041,67 @@ def build_schedule_flex():
         }
     }
     return FlexMessage(
-        alt_text=f"本日のスケジュール ({today})",
+        alt_text="スケジュール確認 - 月を選択",
         contents=FlexContainer.from_dict(flex_json)
     )
+
+
+def process_schedule_request(year, month, event):
+    """スケジュールリクエストを処理してカレンダー画像を送信"""
+    line_api = get_messaging_api()
+    push_target = get_push_target(event)
+
+    # Notionからシフトデータを取得
+    logger.info(f"Fetching shift data for {year}/{month}")
+    shift_data = fetch_shift_data_from_notion(year, month)
+    logger.info(f"Got {len(shift_data)} shift entries")
+
+    if not shift_data:
+        # データがない場合
+        if push_target:
+            line_api.push_message(
+                PushMessageRequest(
+                    to=push_target,
+                    messages=[
+                        TextMessage(text=f"📅 {year}年{month}月のシフトデータが見つかりませんでした。\n\nNotionにデータが登録されているか確認してください。"),
+                        build_main_menu_flex()
+                    ]
+                )
+            )
+        return
+
+    # カレンダーデータに変換
+    cal_data = parse_shift_to_calendar(shift_data, year, month)
+
+    # カレンダー画像を生成
+    img = generate_calendar_image(year, month, cal_data)
+
+    # 画像を保存
+    filename = f"schedule_{year}_{month:02d}_{uuid.uuid4().hex[:8]}.png"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    img.save(filepath, "PNG")
+    logger.info(f"Calendar image saved: {filepath}")
+
+    # 画像URLを構築
+    if BASE_URL:
+        image_url = f"{BASE_URL}/static/images/{filename}"
+    else:
+        image_url = f"https://zenryoku-line-bot-production.up.railway.app/static/images/{filename}"
+
+    # LINEに送信
+    if push_target:
+        line_api.push_message(
+            PushMessageRequest(
+                to=push_target,
+                messages=[
+                    TextMessage(text=f"📅 {year}年{month}月のシフトカレンダーです"),
+                    ImageMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url
+                    )
+                ]
+            )
+        )
 
 
 # ═══════════════════════════════════════════
@@ -911,15 +1322,53 @@ def handle_text_message(event):
         )
         return
 
-    # ─── スケジュール確認 ───
+    # ─── スケジュール確認（月選択表示） ───
     if text == "スケジュール確認":
         user_sessions.pop(session_key, None)
         line_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[build_schedule_flex()]
+                messages=[build_schedule_month_select_flex()]
             )
         )
+        return
+
+    # ─── スケジュール_今月 ───
+    if text == "スケジュール_今月":
+        user_sessions.pop(session_key, None)
+        now = datetime.now()
+
+        line_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=f"📅 {now.year}年{now.month}月のシフトカレンダーを作成中です...\nしばらくお待ちください。")]
+            )
+        )
+
+        # カレンダー画像を生成して送信
+        process_schedule_request(now.year, now.month, event)
+        return
+
+    # ─── スケジュール_来月 ───
+    if text == "スケジュール_来月":
+        user_sessions.pop(session_key, None)
+        now = datetime.now()
+        if now.month == 12:
+            target_year = now.year + 1
+            target_month = 1
+        else:
+            target_year = now.year
+            target_month = now.month + 1
+
+        line_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=f"📅 {target_year}年{target_month}月のシフトカレンダーを作成中です...\nしばらくお待ちください。")]
+            )
+        )
+
+        # カレンダー画像を生成して送信
+        process_schedule_request(target_year, target_month, event)
         return
 
     # ─── セラピスト一覧 ───
@@ -952,7 +1401,7 @@ def handle_text_message(event):
 【使い方】
 「メニュー」→ メインメニュー表示
 「ニュース投稿」→ AI自動生成ニュース
-「スケジュール確認」→ 本日の出勤情報
+「スケジュール確認」→ 月別シフトカレンダー
 「セラピスト一覧」→ 在籍セラピスト
 「店舗情報」→ サロン情報
 
