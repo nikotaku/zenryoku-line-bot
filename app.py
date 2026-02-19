@@ -100,6 +100,19 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # ─── BASE_URL（トンネル公開後に設定） ───
 BASE_URL = os.environ.get("BASE_URL", "https://zenryoku-line-bot-production.up.railway.app")
 
+# ─── 日付パースヘルパー ───
+def parse_date_safe(date_str):
+    """Notionの日付文字列を安全にdateオブジェクトに変換する
+    '2026-02-20' や '2026-02-06T11:00:00.000+00:00' の両方に対応
+    """
+    if not date_str:
+        return None
+    try:
+        return date.fromisoformat(date_str[:10])
+    except (ValueError, TypeError):
+        return None
+
+
 # ─── セラピスト色分け ───
 THERAPIST_COLORS = [
     "#FF6B9D",  # ピンク
@@ -143,18 +156,52 @@ def get_x_client():
 
 
 def post_to_x(text):
-    """Xにテキストを投稿する"""
-    client = get_x_client()
-    if not client:
+    """Xにテキストを投稿する（tweepy + HTTPフォールバック）"""
+    if not all([X_API_KEY, X_API_KEY_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
+        logger.error("X API credentials are not fully set")
         return False, "X APIの認証情報が設定されていません。"
+
+    # まずtweepyで試行
+    client = get_x_client()
+    if client:
+        try:
+            response = client.create_tweet(text=text)
+            tweet_id = response.data["id"]
+            logger.info(f"Tweet posted successfully via tweepy: {tweet_id}")
+            return True, tweet_id
+        except tweepy.TweepyException as e:
+            logger.error(f"Tweepy failed to post tweet: {e}")
+            logger.info("Falling back to direct HTTP API call...")
+        except Exception as e:
+            logger.error(f"Unexpected error with tweepy: {e}\n{traceback.format_exc()}")
+            logger.info("Falling back to direct HTTP API call...")
+
+    # フォールバック: OAuth 1.0aで直接HTTP呼び出し
     try:
-        response = client.create_tweet(text=text)
-        tweet_id = response.data["id"]
-        logger.info(f"Tweet posted successfully: {tweet_id}")
-        return True, tweet_id
-    except tweepy.TweepyException as e:
-        logger.error(f"Failed to post tweet: {e}")
-        return False, str(e)
+        from requests_oauthlib import OAuth1
+        auth = OAuth1(
+            X_API_KEY, X_API_KEY_SECRET,
+            X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
+        )
+        resp = http_requests.post(
+            "https://api.twitter.com/2/tweets",
+            json={"text": text},
+            auth=auth,
+            timeout=30
+        )
+        logger.info(f"Direct X API response: {resp.status_code} {resp.text}")
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            tweet_id = data.get("data", {}).get("id", "")
+            logger.info(f"Tweet posted successfully via direct API: {tweet_id}")
+            return True, tweet_id
+        else:
+            error_msg = resp.text
+            logger.error(f"Direct X API failed: {resp.status_code} {error_msg}")
+            return False, f"X APIエラー ({resp.status_code}): {error_msg[:200]}"
+    except Exception as e:
+        logger.error(f"Direct X API call failed: {e}\n{traceback.format_exc()}")
+        return False, f"X投稿に失敗しました: {str(e)[:200]}"
 
 
 # ═══════════════════════════════════════════
@@ -234,7 +281,7 @@ def fetch_shift_data_from_notion(year, month):
                 # 条件（出勤時間帯）
                 condition_prop = props.get("条件", {})
                 rich_text = condition_prop.get("rich_text", [])
-                condition = rich_text[0]["plain_text"] if rich_text else ""
+                condition = "".join(t.get("plain_text", "") for t in rich_text) if rich_text else ""
 
                 # ルーム
                 room_prop = props.get("ルーム", {})
@@ -314,7 +361,7 @@ def fetch_upcoming_shifts(days=7):
 
             condition_prop = props.get("条件", {})
             rich_text = condition_prop.get("rich_text", [])
-            condition = rich_text[0]["plain_text"] if rich_text else ""
+            condition = "".join(t.get("plain_text", "") for t in rich_text) if rich_text else ""
 
             room_prop = props.get("ルーム", {})
             room_select = room_prop.get("select", {})
@@ -491,15 +538,13 @@ def parse_shift_to_calendar(shift_data, year, month):
         if not start_str:
             continue
 
-        try:
-            start_d = date.fromisoformat(start_str)
-        except ValueError:
+        start_d = parse_date_safe(start_str)
+        if not start_d:
             continue
 
         if end_str:
-            try:
-                end_d = date.fromisoformat(end_str)
-            except ValueError:
+            end_d = parse_date_safe(end_str)
+            if not end_d:
                 end_d = start_d
         else:
             end_d = start_d
@@ -522,16 +567,43 @@ def parse_shift_to_calendar(shift_data, year, month):
 def generate_calendar_image(year, month, cal_data):
     """Pillowでカレンダー画像を生成（ダークテーマ）"""
 
-    # フォント設定
+    # フォント設定（複数パスを試行）
+    font_bold_path = None
+    font_reg_path = None
+    font_candidates_bold = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    font_candidates_reg = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for p in font_candidates_bold:
+        if os.path.exists(p):
+            font_bold_path = p
+            break
+    for p in font_candidates_reg:
+        if os.path.exists(p):
+            font_reg_path = p
+            break
+
     try:
-        # Noto Sans JP を優先
-        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
-        font_reg_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-        font_title = ImageFont.truetype(font_path, 36)
-        font_day_header = ImageFont.truetype(font_path, 20)
-        font_day_num = ImageFont.truetype(font_path, 18)
-        font_name = ImageFont.truetype(font_reg_path, 13)
-        font_legend = ImageFont.truetype(font_reg_path, 14)
+        if font_bold_path and font_reg_path:
+            font_title = ImageFont.truetype(font_bold_path, 36)
+            font_day_header = ImageFont.truetype(font_bold_path, 20)
+            font_day_num = ImageFont.truetype(font_bold_path, 18)
+            font_name = ImageFont.truetype(font_reg_path, 13)
+            font_legend = ImageFont.truetype(font_reg_path, 14)
+        else:
+            raise FileNotFoundError("No suitable font found")
     except Exception as e:
         logger.warning(f"Font loading error: {e}, using default")
         font_title = ImageFont.load_default()
@@ -778,7 +850,8 @@ def build_upcoming_shifts_flex(shifts):
         for s in shifts:
             if s["date"] != current_date:
                 current_date = s["date"]
-                dt = datetime.fromisoformat(current_date)
+                dt_parsed = parse_date_safe(current_date)
+                dt = datetime.combine(dt_parsed, datetime.min.time()) if dt_parsed else datetime.now()
                 content.append({
                     "type": "text",
                     "text": f"📅 {dt.strftime('%m/%d')}({['月','火','水','木','金','土','日'][dt.weekday()]})",
@@ -1198,8 +1271,8 @@ def process_schedule_request(year, month, event):
         return
 
     # 今日のスケジュールをテキストで構築
-    today_str = date.today().isoformat()
-    today_shifts = [s for s in shift_data if s["start_date"] == today_str]
+    today_val = date.today()
+    today_shifts = [s for s in shift_data if parse_date_safe(s["start_date"]) == today_val]
     
     today_text = f"📅 本日({date.today().strftime('%m/%d')})のスケジュール\n"
     if today_shifts:
