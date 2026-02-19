@@ -14,6 +14,12 @@
 - `NOTION_DATABASE_ID`: シフト管理データベースID（既存）
 - `NOTION_NEWS_DATABASE_ID`: ニュースデータベースID `74dde0685a7a4ee09aeb67e53658e63e`
 
+### X (Twitter) API設定
+- `X_API_KEY`: X API Key
+- `X_API_KEY_SECRET`: X API Key Secret
+- `X_ACCESS_TOKEN`: X Access Token
+- `X_ACCESS_TOKEN_SECRET`: X Access Token Secret
+
 ### その他
 - `BASE_URL`: `https://zenryoku-line-bot-production.up.railway.app`
 - `PORT`: Railwayが自動設定（通常は設定不要）
@@ -41,3 +47,10 @@
 - 保存済みニュースを選択
 - LINE Broadcast APIでフォロワーに一斉配信
 - 配信後、Notionで配信済みにマーク
+
+### X（Twitter）投稿
+1. LINEボットのメニューから「X投稿」を選択
+2. 投稿したい内容を入力（最大280文字）
+3. プレビューを確認
+4. 「投稿する」でXに投稿実行
+5. 投稿成功時はツイートURLが表示される

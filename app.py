@@ -43,6 +43,7 @@ from linebot.v3.exceptions import InvalidSignatureError
 
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
+import tweepy
 
 # ─── ログ設定 ───
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -60,6 +61,12 @@ ADMIN_USER_ID = os.environ.get("LINE_ADMIN_USER_ID", "U485fac63c62459cb069c64a1a
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "256f9507f0cf8076931fed70fc040520")
 NOTION_NEWS_DATABASE_ID = os.environ.get("NOTION_NEWS_DATABASE_ID", "74dde0685a7a4ee09aeb67e53658e63e")
+
+# X (Twitter) API
+X_API_KEY = os.environ.get("X_API_KEY", "")
+X_API_KEY_SECRET = os.environ.get("X_API_KEY_SECRET", "")
+X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN", "")
+X_ACCESS_TOKEN_SECRET = os.environ.get("X_ACCESS_TOKEN_SECRET", "")
 
 # ─── Flask ───
 app = Flask(__name__)
@@ -111,6 +118,43 @@ THERAPIST_COLORS = [
     "#FDE68A",  # ライトイエロー
     "#FDBA74",  # ライトオレンジ
 ]
+
+
+# ═══════════════════════════════════════════
+#  X (Twitter) API連携
+# ═══════════════════════════════════════════
+
+def get_x_client():
+    """Tweepy Client (API v2) を取得"""
+    if not all([X_API_KEY, X_API_KEY_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
+        logger.error("X API credentials are not fully set")
+        return None
+    try:
+        client = tweepy.Client(
+            consumer_key=X_API_KEY,
+            consumer_secret=X_API_KEY_SECRET,
+            access_token=X_ACCESS_TOKEN,
+            access_token_secret=X_ACCESS_TOKEN_SECRET,
+        )
+        return client
+    except Exception as e:
+        logger.error(f"Failed to create X client: {e}")
+        return None
+
+
+def post_to_x(text):
+    """Xにテキストを投稿する"""
+    client = get_x_client()
+    if not client:
+        return False, "X APIの認証情報が設定されていません。"
+    try:
+        response = client.create_tweet(text=text)
+        tweet_id = response.data["id"]
+        logger.info(f"Tweet posted successfully: {tweet_id}")
+        return True, tweet_id
+    except tweepy.TweepyException as e:
+        logger.error(f"Failed to post tweet: {e}")
+        return False, str(e)
 
 
 # ═══════════════════════════════════════════
@@ -689,6 +733,7 @@ def build_main_menu_flex():
                         make_menu_button("📰 ニュース作成", "ニュース作成"),
                         make_menu_button("📋 ニュース一覧", "ニュース一覧"),
                         make_menu_button("📢 ニュース配信", "ニュース配信"),
+                        make_menu_button("🐦 X投稿", "X投稿"),
                     ],
                     "margin": "lg",
                     "spacing": "sm"
@@ -1071,6 +1116,40 @@ def build_news_delivery_select_flex(news_list):
     return FlexMessage(alt_text="ニュース配信", contents=FlexContainer.from_dict(flex_json))
 
 
+def build_x_post_confirm_flex(post_text):
+    """X投稿確認用のFlex Message"""
+    display_text = post_text[:200] + "..." if len(post_text) > 200 else post_text
+    flex_json = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [{"type": "text", "text": "\ud83d\udc26 X投稿 確認", "weight": "bold", "size": "lg", "align": "center"}],
+            "backgroundColor": "#f0e6d3",
+            "paddingAll": "15px"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "以下の内容でXに投稿します", "size": "sm", "color": "#888888", "align": "center", "margin": "md"},
+                {"type": "separator", "margin": "lg"},
+                {"type": "text", "text": display_text, "size": "sm", "wrap": True, "margin": "md"},
+                {"type": "text", "text": f"（{len(post_text)}文字）", "size": "xs", "color": "#888888", "align": "right", "margin": "sm"},
+                {"type": "separator", "margin": "lg"},
+                {"type": "box", "layout": "vertical", "contents": [
+                    {"type": "button", "action": {"type": "message", "label": "\u2705 投稿する", "text": "X投稿実行"}, "style": "primary", "color": "#1a1a2e"},
+                    {"type": "button", "action": {"type": "message", "label": "\u270f\ufe0f 修正する", "text": "X投稿修正"}, "style": "secondary", "margin": "sm"},
+                    {"type": "button", "action": {"type": "message", "label": "\ud83d\udd19 キャンセル", "text": "X投稿キャンセル"}, "style": "secondary", "margin": "sm"}
+                ], "margin": "lg"}
+            ],
+            "paddingAll": "15px"
+        }
+    }
+    return FlexMessage(alt_text="X投稿 確認", contents=FlexContainer.from_dict(flex_json))
+
+
 def build_schedule_month_select_flex():
     """スケジュール月選択のFlex Message"""
     now = datetime.now()
@@ -1279,6 +1358,72 @@ def handle_text_message(event):
                 line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text="✅ ニュースを配信しました！"), build_main_menu_flex()]))
         except: pass
         user_sessions.pop(session_key, None)
+        return
+
+    # ─── X投稿フロー ───
+    if text == "X投稿":
+        user_sessions[session_key] = {"state": "x_post_input"}
+        line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+            TextMessage(text="🐦 X（Twitter）投稿\n\n投稿したい内容を入力してください。\n（最大280文字）\n\n「キャンセル」でメニューに戻ります。")
+        ]))
+        return
+
+    if state == "x_post_input":
+        if text in ["キャンセル", "cancel"]:
+            user_sessions.pop(session_key, None)
+            line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+                TextMessage(text="X投稿をキャンセルしました。"),
+                build_main_menu_flex()
+            ]))
+            return
+        # 文字数チェック
+        if len(text) > 280:
+            line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+                TextMessage(text=f"⚠️ 投稿内容が280文字を超えています（{len(text)}文字）。\n280文字以内に修正して再入力してください。")
+            ]))
+            return
+        # 確認フローへ
+        user_sessions[session_key] = {"state": "x_post_confirm", "x_post_text": text}
+        line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+            build_x_post_confirm_flex(text)
+        ]))
+        return
+
+    if text == "X投稿実行" and state == "x_post_confirm":
+        post_text = session.get("x_post_text", "")
+        line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+            TextMessage(text="🐦 Xに投稿中...")
+        ]))
+        success, result = post_to_x(post_text)
+        push_target = get_push_target(event)
+        if push_target:
+            if success:
+                tweet_url = f"https://x.com/i/status/{result}"
+                line_api.push_message(PushMessageRequest(to=push_target, messages=[
+                    TextMessage(text=f"✅ Xに投稿しました！\n\n🔗 {tweet_url}"),
+                    build_main_menu_flex()
+                ]))
+            else:
+                line_api.push_message(PushMessageRequest(to=push_target, messages=[
+                    TextMessage(text=f"❌ X投稿に失敗しました。\n\nエラー: {result}"),
+                    build_main_menu_flex()
+                ]))
+        user_sessions.pop(session_key, None)
+        return
+
+    if text == "X投稿キャンセル" and state == "x_post_confirm":
+        user_sessions.pop(session_key, None)
+        line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+            TextMessage(text="X投稿をキャンセルしました。"),
+            build_main_menu_flex()
+        ]))
+        return
+
+    if text == "X投稿修正" and state == "x_post_confirm":
+        user_sessions[session_key] = {"state": "x_post_input"}
+        line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+            TextMessage(text="🐦 投稿内容を再入力してください。\n（最大280文字）")
+        ]))
         return
 
     if text == "スケジュール確認":
