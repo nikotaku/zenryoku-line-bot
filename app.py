@@ -59,6 +59,7 @@ ADMIN_USER_ID = os.environ.get("LINE_ADMIN_USER_ID", "U485fac63c62459cb069c64a1a
 # Notion API
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "256f9507f0cf8076931fed70fc040520")
+NOTION_NEWS_DATABASE_ID = os.environ.get("NOTION_NEWS_DATABASE_ID", "74dde0685a7a4ee09aeb67e53658e63e")
 
 # ─── Flask ───
 app = Flask(__name__)
@@ -113,7 +114,7 @@ THERAPIST_COLORS = [
 
 
 # ═══════════════════════════════════════════
-#  Notion API連携
+#  Notion API連携 - シフト管理
 # ═══════════════════════════════════════════
 
 def fetch_shift_data_from_notion(year, month):
@@ -213,6 +214,154 @@ def fetch_shift_data_from_notion(year, month):
             break
 
     return all_results
+
+
+# ═══════════════════════════════════════════
+#  Notion API連携 - ニュース管理
+# ═══════════════════════════════════════════
+
+def save_news_to_notion(title, body, category):
+    """ニュースをNotionデータベースに保存"""
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY is not set")
+        return None
+
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    now = datetime.now()
+    payload = {
+        "parent": {"database_id": NOTION_NEWS_DATABASE_ID},
+        "properties": {
+            "タイトル": {
+                "title": [{"text": {"content": title}}]
+            },
+            "本文": {
+                "rich_text": [{"text": {"content": body}}]
+            },
+            "カテゴリ": {
+                "select": {"name": category}
+            },
+            "作成日時": {
+                "date": {"start": now.isoformat()}
+            },
+            "配信済み": {
+                "checkbox": False
+            }
+        }
+    }
+
+    try:
+        resp = http_requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(f"News saved to Notion: {data.get('id')}")
+        return data.get("id")
+    except Exception as e:
+        logger.error(f"Failed to save news to Notion: {e}\n{traceback.format_exc()}")
+        return None
+
+
+def fetch_news_from_notion(limit=10):
+    """Notionからニュース一覧を取得"""
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY is not set")
+        return []
+
+    url = f"https://api.notion.com/v1/databases/{NOTION_NEWS_DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    payload = {
+        "sorts": [{"property": "作成日時", "direction": "descending"}],
+        "page_size": limit,
+    }
+
+    try:
+        resp = http_requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        news_list = []
+        for page in data.get("results", []):
+            props = page.get("properties", {})
+            page_id = page.get("id")
+
+            # タイトル
+            title_prop = props.get("タイトル", {})
+            title_arr = title_prop.get("title", [])
+            title = title_arr[0]["plain_text"] if title_arr else ""
+
+            # 本文
+            body_prop = props.get("本文", {})
+            body_arr = body_prop.get("rich_text", [])
+            body = body_arr[0]["plain_text"] if body_arr else ""
+
+            # カテゴリ
+            category_prop = props.get("カテゴリ", {})
+            category_select = category_prop.get("select", {})
+            category = category_select.get("name", "") if category_select else ""
+
+            # 作成日時
+            created_prop = props.get("作成日時", {})
+            created_obj = created_prop.get("date", {})
+            created = created_obj.get("start", "") if created_obj else ""
+
+            # 配信済み
+            delivered_prop = props.get("配信済み", {})
+            delivered = delivered_prop.get("checkbox", False)
+
+            news_list.append({
+                "id": page_id,
+                "title": title,
+                "body": body,
+                "category": category,
+                "created": created,
+                "delivered": delivered,
+            })
+
+        return news_list
+    except Exception as e:
+        logger.error(f"Failed to fetch news from Notion: {e}\n{traceback.format_exc()}")
+        return []
+
+
+def mark_news_as_delivered(page_id):
+    """ニュースを配信済みにマーク"""
+    if not NOTION_API_KEY:
+        logger.error("NOTION_API_KEY is not set")
+        return False
+
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    now = datetime.now()
+    payload = {
+        "properties": {
+            "配信済み": {"checkbox": True},
+            "配信日時": {"date": {"start": now.isoformat()}}
+        }
+    }
+
+    try:
+        resp = http_requests.patch(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        logger.info(f"News marked as delivered: {page_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark news as delivered: {e}\n{traceback.format_exc()}")
+        return False
 
 
 def parse_shift_to_calendar(shift_data, year, month):
@@ -332,148 +481,115 @@ def generate_calendar_image(year, month, cal_data):
 
     # 曜日ヘッダー
     weekdays = ["日", "月", "火", "水", "木", "金", "土"]
-    y_start = header_h
+    y_offset = header_h
     for i, wd in enumerate(weekdays):
         x = padding + i * cell_w
-        # 曜日ヘッダー背景
-        draw.rectangle([x, y_start, x + cell_w - 1, y_start + day_header_h], fill="#0a1628")
+        color = sun_color if i == 0 else (sat_color if i == 6 else text_white)
         bbox = draw.textbbox((0, 0), wd, font=font_day_header)
         tw = bbox[2] - bbox[0]
-        if i == 0:  # 日曜
-            color = sun_color
-        elif i == 6:  # 土曜
-            color = sat_color
-        else:
-            color = text_white
-        draw.text((x + (cell_w - tw) // 2, y_start + 7), wd, fill=color, font=font_day_header)
+        draw.text((x + (cell_w - tw) // 2, y_offset + 7), wd, fill=color, font=font_day_header)
 
-    # 今日の日付
+    y_offset += day_header_h
+
+    # カレンダーセル
     today = date.today()
+    day_num = 1
+    for row in range(num_rows):
+        for col in range(7):
+            cell_index = row * 7 + col
+            if cell_index < first_weekday_sun or day_num > num_days:
+                continue
 
-    # カレンダーセル描画
-    y_base = header_h + day_header_h
-    for day in range(1, num_days + 1):
-        cell_index = first_weekday_sun + day - 1
-        col = cell_index % 7
-        row = cell_index // 7
+            x = padding + col * cell_w
+            y = y_offset + row * cell_h
 
-        x = padding + col * cell_w
-        y = y_base + row * cell_h
+            # 今日かどうか
+            is_today = (year == today.year and month == today.month and day_num == today.day)
+            bg = today_bg if is_today else cell_bg
+            border = today_border if is_today else cell_border
 
-        # 今日のハイライト
-        is_today = (year == today.year and month == today.month and day == today.day)
+            # セル背景
+            draw.rectangle([x, y, x + cell_w - 1, y + cell_h - 1], fill=bg, outline=border, width=2)
 
-        if is_today:
-            draw.rectangle([x + 1, y + 1, x + cell_w - 2, y + cell_h - 2], fill="#2a1a3e", outline=today_border, width=2)
-        else:
-            draw.rectangle([x + 1, y + 1, x + cell_w - 2, y + cell_h - 2], fill=cell_bg, outline=cell_border, width=1)
-
-        # 日付番号
-        day_str = str(day)
-        if col == 0:  # 日曜
-            day_color = sun_color
-        elif col == 6:  # 土曜
-            day_color = sat_color
-        else:
-            day_color = text_white
-
-        if is_today:
-            # 今日の日付は丸背景
+            # 日付番号
+            day_str = str(day_num)
             bbox = draw.textbbox((0, 0), day_str, font=font_day_num)
             tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            circle_r = max(tw, th) // 2 + 5
-            cx = x + 18
-            cy = y + 16
-            draw.ellipse([cx - circle_r, cy - circle_r, cx + circle_r, cy + circle_r], fill=today_bg)
-            draw.text((cx - tw // 2, cy - th // 2 - 2), day_str, fill=text_white, font=font_day_num)
-        else:
-            draw.text((x + 6, y + 4), day_str, fill=day_color, font=font_day_num)
+            draw.text((x + (cell_w - tw) // 2, y + 5), day_str, fill=text_white, font=font_day_num)
 
-        # シフト情報
-        shifts = cal_data.get(day, [])
-        name_y = y + 28
-        max_display = 5  # 最大表示数
-        for idx, shift in enumerate(shifts[:max_display]):
-            name = shift["name"]
-            color = therapist_color_map.get(name, "#ffffff")
-            # 名前の短縮表示（セル幅に収まるように）
-            display_name = name
-            if len(display_name) > 5:
-                display_name = display_name[:4] + ".."
-            draw.text((x + 6, name_y), display_name, fill=color, font=font_name)
-            name_y += 16
-            if name_y > y + cell_h - 8:
-                break
+            # シフト情報
+            shifts = cal_data.get(day_num, [])
+            name_y = y + 30
+            for shift in shifts[:3]:  # 最大3人まで表示
+                name = shift["name"]
+                condition = shift["condition"]
+                color = therapist_color_map.get(name, text_white)
+                text = f"{name} {condition}"
+                draw.text((x + 5, name_y), text, fill=color, font=font_name)
+                name_y += 18
 
-        if len(shifts) > max_display:
-            draw.text((x + 6, name_y), f"+{len(shifts) - max_display}名", fill=text_gray, font=font_name)
+            if len(shifts) > 3:
+                draw.text((x + 5, name_y), f"+{len(shifts) - 3}名", fill=text_gray, font=font_name)
 
-    # 凡例（レジェンド）
-    legend_y = y_base + num_rows * cell_h + 10
-    draw.rectangle([padding, legend_y, img_w - padding, legend_y + legend_h - 10], fill="#0a1628", outline=cell_border)
-    draw.text((padding + 10, legend_y + 6), "■ セラピスト凡例", fill=text_white, font=font_legend)
+            day_num += 1
 
-    legend_x = padding + 10
-    legend_item_y = legend_y + 30
-    col_width = (img_w - padding * 2 - 20) // 5
+    # 凡例
+    legend_y = y_offset + num_rows * cell_h + 10
+    draw.text((padding, legend_y), "セラピスト凡例:", fill=text_white, font=font_legend)
+    legend_y += 25
 
+    col_count = 5
     for i, name in enumerate(therapist_list):
-        col_idx = i % 5
-        row_idx = i // 5
-        lx = legend_x + col_idx * col_width
-        ly = legend_item_y + row_idx * 24
+        col = i % col_count
+        row = i // col_count
+        x = padding + col * (img_w // col_count)
+        y = legend_y + row * 28
         color = therapist_color_map[name]
-        draw.rectangle([lx, ly + 2, lx + 12, ly + 14], fill=color)
-        draw.text((lx + 16, ly), name, fill=color, font=font_legend)
+        draw.rectangle([x, y, x + 15, y + 15], fill=color)
+        draw.text((x + 20, y), name, fill=text_white, font=font_legend)
 
     return img
 
 
 # ═══════════════════════════════════════════
-#  ヘルスチェック
+#  Flask ルート
 # ═══════════════════════════════════════════
 
-@app.route("/", methods=["GET"])
-def index():
-    return jsonify({"status": "ok", "bot": "全力エステ LINE Bot"})
-
-# ─── 静的ファイル配信 ───
-@app.route("/static/images/<path:filename>")
-def serve_image(filename):
-    return send_from_directory(UPLOAD_DIR, filename)
-
-# ─── BASE_URL 設定用エンドポイント ───
-@app.route("/set-base-url", methods=["POST"])
-def set_base_url():
-    global BASE_URL
-    data = request.get_json()
-    BASE_URL = data.get("base_url", "").rstrip("/")
-    logger.info(f"BASE_URL set to: {BASE_URL}")
-    return jsonify({"status": "ok", "base_url": BASE_URL})
-
-# ─── Webhook ───
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-    logger.info(f"Webhook received: {body[:200]}")
+    logger.info(f"Request body: {body}")
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         logger.error("Invalid signature")
         abort(400)
-    except Exception as e:
-        logger.error(f"Error handling webhook: {e}\n{traceback.format_exc()}")
+
     return "OK"
 
 
+@app.route("/")
+def index():
+    return jsonify({
+        "status": "running",
+        "bot_name": "全力エステ LINE Bot",
+        "version": "2.0"
+    })
+
+
+@app.route("/static/images/<path:filename>")
+def serve_image(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
 # ═══════════════════════════════════════════
-#  メニュー構築
+#  Flex Message構築
 # ═══════════════════════════════════════════
 
 def build_main_menu_flex():
-    """メインメニューのFlex Messageを構築"""
+    """メインメニューのFlex Message"""
     flex_json = {
         "type": "bubble",
         "size": "mega",
@@ -488,14 +604,6 @@ def build_main_menu_flex():
                     "size": "xl",
                     "color": "#1a1a2e",
                     "align": "center"
-                },
-                {
-                    "type": "text",
-                    "text": "仙台No.1を本気で狙うハイレベルサロン",
-                    "size": "xs",
-                    "color": "#666666",
-                    "align": "center",
-                    "margin": "sm"
                 }
             ],
             "backgroundColor": "#f0e6d3",
@@ -521,7 +629,9 @@ def build_main_menu_flex():
                     "type": "box",
                     "layout": "vertical",
                     "contents": [
-                        make_menu_button("📰 ニュース投稿", "ニュース投稿"),
+                        make_menu_button("📰 ニュース作成", "ニュース作成"),
+                        make_menu_button("📋 ニュース一覧", "ニュース一覧"),
+                        make_menu_button("📢 ニュース配信", "ニュース配信"),
                         make_menu_button("📅 スケジュール確認", "スケジュール確認"),
                         make_menu_button("💆 セラピスト一覧", "セラピスト一覧"),
                         make_menu_button("🏠 店舗情報", "店舗情報"),
@@ -781,12 +891,87 @@ def generate_news(topic=None):
         }
 
 
-def build_news_confirm_flex(news_data, session_id):
+def build_news_category_select_flex():
+    """ニュースカテゴリ選択のFlex Message"""
+    flex_json = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📰 ニュース作成",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#1a1a2e",
+                    "align": "center"
+                }
+            ],
+            "backgroundColor": "#f0e6d3",
+            "paddingAll": "15px"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "カテゴリを選択してください",
+                    "size": "sm",
+                    "color": "#888888",
+                    "align": "center",
+                    "margin": "md"
+                },
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        make_menu_button("📢 お知らせ", "カテゴリ_お知らせ"),
+                        make_menu_button("🎉 キャンペーン", "カテゴリ_キャンペーン"),
+                        make_menu_button("✨ 新メニュー", "カテゴリ_新メニュー"),
+                        make_menu_button("💆 セラピスト紹介", "カテゴリ_セラピスト紹介"),
+                        make_menu_button("📝 その他", "カテゴリ_その他"),
+                    ],
+                    "margin": "lg",
+                    "spacing": "sm"
+                },
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "🔙 メニューに戻る",
+                        "text": "メニュー"
+                    },
+                    "style": "secondary",
+                    "height": "sm",
+                    "margin": "lg"
+                }
+            ],
+            "paddingAll": "15px"
+        }
+    }
+    return FlexMessage(
+        alt_text="ニュースカテゴリ選択",
+        contents=FlexContainer.from_dict(flex_json)
+    )
+
+
+def build_news_confirm_flex(news_data, category):
     """ニュース確認用のFlex Message"""
     title = news_data.get("title", "")
     body = news_data.get("body", "")
     # 本文が長い場合は表示用に切り詰め
-    display_body = body[:300] + "..." if len(body) > 300 else body
+    display_body = body[:200] + "..." if len(body) > 200 else body
 
     flex_json = {
         "type": "bubble",
@@ -822,6 +1007,14 @@ def build_news_confirm_flex(news_data, session_id):
                 {"type": "separator", "margin": "md"},
                 {
                     "type": "text",
+                    "text": f"カテゴリ: {category}",
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "md"
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
                     "text": display_body,
                     "size": "sm",
                     "color": "#333333",
@@ -833,10 +1026,13 @@ def build_news_confirm_flex(news_data, session_id):
                     "text": f"（全{len(body)}文字）",
                     "size": "xs",
                     "color": "#888888",
-                    "align": "end",
-                    "margin": "md"
+                    "align": "right",
+                    "margin": "sm"
                 },
-                {"type": "separator", "margin": "md"},
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
                 {
                     "type": "box",
                     "layout": "vertical",
@@ -845,8 +1041,8 @@ def build_news_confirm_flex(news_data, session_id):
                             "type": "button",
                             "action": {
                                 "type": "message",
-                                "label": "✅ このニュースを投稿する",
-                                "text": "ニュース確定"
+                                "label": "✅ この内容で保存",
+                                "text": "ニュース保存"
                             },
                             "style": "primary",
                             "color": "#1a1a2e",
@@ -856,7 +1052,7 @@ def build_news_confirm_flex(news_data, session_id):
                             "type": "button",
                             "action": {
                                 "type": "message",
-                                "label": "🔄 再生成する",
+                                "label": "🔄 再生成",
                                 "text": "ニュース再生成"
                             },
                             "style": "secondary",
@@ -882,42 +1078,111 @@ def build_news_confirm_flex(news_data, session_id):
         }
     }
     return FlexMessage(
-        alt_text=f"ニュースプレビュー: {title}",
+        alt_text="ニュース プレビュー",
         contents=FlexContainer.from_dict(flex_json)
     )
 
 
-def build_news_post_flex(news_data, image_urls=None):
-    """投稿用ニュースのFlex Message"""
-    title = news_data.get("title", "")
-    body = news_data.get("body", "")
-
-    contents = [
-        {
-            "type": "text",
-            "text": f"📰 {title}",
-            "weight": "bold",
-            "size": "lg",
-            "color": "#1a1a2e",
-            "wrap": True
-        },
-        {
-            "type": "text",
-            "text": datetime.now().strftime("%Y年%m月%d日"),
-            "size": "xs",
-            "color": "#888888",
-            "margin": "sm"
-        },
-        {"type": "separator", "margin": "md"},
-        {
-            "type": "text",
-            "text": body,
-            "size": "sm",
-            "color": "#333333",
-            "wrap": True,
-            "margin": "md"
+def build_news_list_flex(news_list):
+    """ニュース一覧のFlex Message"""
+    if not news_list:
+        flex_json = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "📋 ニュース一覧",
+                        "weight": "bold",
+                        "size": "lg",
+                        "color": "#1a1a2e",
+                        "align": "center"
+                    }
+                ],
+                "backgroundColor": "#f0e6d3",
+                "paddingAll": "15px"
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "保存されたニュースがありません",
+                        "size": "sm",
+                        "color": "#888888",
+                        "align": "center",
+                        "margin": "md"
+                    },
+                    {
+                        "type": "separator",
+                        "margin": "lg"
+                    },
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "message",
+                            "label": "🔙 メニューに戻る",
+                            "text": "メニュー"
+                        },
+                        "style": "secondary",
+                        "height": "sm",
+                        "margin": "lg"
+                    }
+                ],
+                "paddingAll": "15px"
+            }
         }
-    ]
+        return FlexMessage(
+            alt_text="ニュース一覧",
+            contents=FlexContainer.from_dict(flex_json)
+        )
+
+    # ニュース項目を作成
+    news_items = []
+    for i, news in enumerate(news_list[:5]):  # 最大5件
+        status = "✅ 配信済み" if news["delivered"] else "📝 未配信"
+        news_items.append({
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{i+1}. {news['title']}",
+                    "weight": "bold",
+                    "size": "sm",
+                    "color": "#1a1a2e",
+                    "wrap": True
+                },
+                {
+                    "type": "text",
+                    "text": f"{news['category']} | {status}",
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "xs"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "詳細を見る",
+                        "text": f"ニュース詳細_{i}"
+                    },
+                    "style": "link",
+                    "height": "sm",
+                    "margin": "xs"
+                }
+            ],
+            "margin": "md",
+            "paddingAll": "10px",
+            "backgroundColor": "#f5f5f5",
+            "cornerRadius": "md"
+        })
+        if i < len(news_list) - 1:
+            news_items.append({"type": "separator", "margin": "md"})
 
     flex_json = {
         "type": "bubble",
@@ -928,7 +1193,7 @@ def build_news_post_flex(news_data, image_urls=None):
             "contents": [
                 {
                     "type": "text",
-                    "text": "🏆 全力エステ NEWS",
+                    "text": "📋 ニュース一覧",
                     "weight": "bold",
                     "size": "lg",
                     "color": "#1a1a2e",
@@ -941,30 +1206,305 @@ def build_news_post_flex(news_data, image_urls=None):
         "body": {
             "type": "box",
             "layout": "vertical",
-            "contents": contents,
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"保存されたニュース（{len(news_list)}件）",
+                    "size": "sm",
+                    "color": "#888888",
+                    "align": "center"
+                },
+                {
+                    "type": "separator",
+                    "margin": "md"
+                },
+                *news_items,
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "🔙 メニューに戻る",
+                        "text": "メニュー"
+                    },
+                    "style": "secondary",
+                    "height": "sm",
+                    "margin": "lg"
+                }
+            ],
             "paddingAll": "15px"
         }
     }
-
     return FlexMessage(
-        alt_text=f"全力エステNEWS: {title}",
+        alt_text="ニュース一覧",
         contents=FlexContainer.from_dict(flex_json)
     )
 
 
-# ═══════════════════════════════════════════
-#  スケジュール確認（月選択Flex）
-# ═══════════════════════════════════════════
+def build_news_detail_flex(news):
+    """ニュース詳細のFlex Message"""
+    title = news.get("title", "")
+    body = news.get("body", "")
+    category = news.get("category", "")
+    delivered = news.get("delivered", False)
+    status = "✅ 配信済み" if delivered else "📝 未配信"
+
+    # 本文が長い場合は表示用に切り詰め
+    display_body = body[:300] + "..." if len(body) > 300 else body
+
+    flex_json = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📰 ニュース詳細",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#1a1a2e",
+                    "align": "center"
+                }
+            ],
+            "backgroundColor": "#f0e6d3",
+            "paddingAll": "15px"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"📌 {title}",
+                    "weight": "bold",
+                    "size": "md",
+                    "color": "#1a1a2e",
+                    "wrap": True
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": f"カテゴリ: {category} | {status}",
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "md"
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "text",
+                    "text": display_body,
+                    "size": "sm",
+                    "color": "#333333",
+                    "wrap": True,
+                    "margin": "md"
+                },
+                {
+                    "type": "text",
+                    "text": f"（全{len(body)}文字）",
+                    "size": "xs",
+                    "color": "#888888",
+                    "align": "right",
+                    "margin": "sm"
+                },
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "🔙 一覧に戻る",
+                        "text": "ニュース一覧"
+                    },
+                    "style": "secondary",
+                    "height": "sm",
+                    "margin": "lg"
+                }
+            ],
+            "paddingAll": "15px"
+        }
+    }
+    return FlexMessage(
+        alt_text="ニュース詳細",
+        contents=FlexContainer.from_dict(flex_json)
+    )
+
+
+def build_news_delivery_select_flex(news_list):
+    """ニュース配信選択のFlex Message"""
+    if not news_list:
+        flex_json = {
+            "type": "bubble",
+            "size": "mega",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "📢 ニュース配信",
+                        "weight": "bold",
+                        "size": "lg",
+                        "color": "#1a1a2e",
+                        "align": "center"
+                    }
+                ],
+                "backgroundColor": "#f0e6d3",
+                "paddingAll": "15px"
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "配信可能なニュースがありません",
+                        "size": "sm",
+                        "color": "#888888",
+                        "align": "center",
+                        "margin": "md"
+                    },
+                    {
+                        "type": "separator",
+                        "margin": "lg"
+                    },
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "message",
+                            "label": "🔙 メニューに戻る",
+                            "text": "メニュー"
+                        },
+                        "style": "secondary",
+                        "height": "sm",
+                        "margin": "lg"
+                    }
+                ],
+                "paddingAll": "15px"
+            }
+        }
+        return FlexMessage(
+            alt_text="ニュース配信",
+            contents=FlexContainer.from_dict(flex_json)
+        )
+
+    # ニュース項目を作成
+    news_items = []
+    for i, news in enumerate(news_list[:5]):  # 最大5件
+        news_items.append({
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"{i+1}. {news['title']}",
+                    "weight": "bold",
+                    "size": "sm",
+                    "color": "#1a1a2e",
+                    "wrap": True
+                },
+                {
+                    "type": "text",
+                    "text": f"{news['category']}",
+                    "size": "xs",
+                    "color": "#888888",
+                    "margin": "xs"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "📢 このニュースを配信",
+                        "text": f"配信実行_{i}"
+                    },
+                    "style": "primary",
+                    "color": "#1a1a2e",
+                    "height": "sm",
+                    "margin": "xs"
+                }
+            ],
+            "margin": "md",
+            "paddingAll": "10px",
+            "backgroundColor": "#f5f5f5",
+            "cornerRadius": "md"
+        })
+        if i < len(news_list) - 1:
+            news_items.append({"type": "separator", "margin": "md"})
+
+    flex_json = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📢 ニュース配信",
+                    "weight": "bold",
+                    "size": "lg",
+                    "color": "#1a1a2e",
+                    "align": "center"
+                }
+            ],
+            "backgroundColor": "#f0e6d3",
+            "paddingAll": "15px"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "配信するニュースを選択してください",
+                    "size": "sm",
+                    "color": "#888888",
+                    "align": "center"
+                },
+                {
+                    "type": "separator",
+                    "margin": "md"
+                },
+                *news_items,
+                {
+                    "type": "separator",
+                    "margin": "lg"
+                },
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "message",
+                        "label": "🔙 メニューに戻る",
+                        "text": "メニュー"
+                    },
+                    "style": "secondary",
+                    "height": "sm",
+                    "margin": "lg"
+                }
+            ],
+            "paddingAll": "15px"
+        }
+    }
+    return FlexMessage(
+        alt_text="ニュース配信",
+        contents=FlexContainer.from_dict(flex_json)
+    )
+
 
 def build_schedule_month_select_flex():
-    """スケジュール確認: 今月/来月の選択Flex Message"""
+    """スケジュール月選択のFlex Message"""
     now = datetime.now()
-    this_month = now.strftime("%Y年%m月")
+    this_month = f"{now.month}月"
     if now.month == 12:
-        next_month_dt = now.replace(year=now.year + 1, month=1, day=1)
+        next_month = "1月"
     else:
-        next_month_dt = now.replace(month=now.month + 1, day=1)
-    next_month = next_month_dt.strftime("%Y年%m月")
+        next_month = f"{now.month + 1}月"
 
     flex_json = {
         "type": "bubble",
@@ -991,7 +1531,7 @@ def build_schedule_month_select_flex():
             "contents": [
                 {
                     "type": "text",
-                    "text": "確認したい月を選択してください",
+                    "text": "表示する月を選択してください",
                     "size": "sm",
                     "color": "#888888",
                     "align": "center",
@@ -1180,14 +1720,26 @@ def handle_text_message(event):
         )
         return
 
-    # ─── ニュース投稿 ───
-    if text == "ニュース投稿":
-        user_sessions[session_key] = {"state": "news_topic"}
+    # ─── ニュース作成 ───
+    if text == "ニュース作成":
+        user_sessions[session_key] = {"state": "news_category_select"}
+        line_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[build_news_category_select_flex()]
+            )
+        )
+        return
+
+    # ─── カテゴリ選択 ───
+    if text.startswith("カテゴリ_") and state == "news_category_select":
+        category = text.replace("カテゴリ_", "")
+        user_sessions[session_key] = {"state": "news_topic", "category": category}
         line_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[
-                    TextMessage(text="📰 ニュース投稿\n\nニュースのテーマを入力してください。\n（例：新人セラピスト紹介、キャンペーン告知、季節のおすすめ）\n\n「おまかせ」と入力するとAIが自動でテーマを選びます。")
+                    TextMessage(text=f"📰 ニュース作成（カテゴリ: {category}）\n\nニュースのテーマを入力してください。\n（例：新人セラピスト紹介、春のキャンペーン、新メニュー登場）\n\n「おまかせ」と入力するとAIが自動でテーマを選びます。")
                 ]
             )
         )
@@ -1196,7 +1748,8 @@ def handle_text_message(event):
     # ─── ニュース テーマ入力待ち ───
     if state == "news_topic":
         topic = None if text in ["おまかせ", "お任せ", "自動"] else text
-        user_sessions[session_key] = {"state": "news_generating"}
+        category = session.get("category", "その他")
+        user_sessions[session_key] = {"state": "news_generating", "category": category}
 
         # 生成中メッセージ
         line_api.reply_message(
@@ -1211,8 +1764,8 @@ def handle_text_message(event):
         user_sessions[session_key] = {
             "state": "news_preview",
             "news": news,
+            "category": category,
             "topic": topic,
-            "images": []
         }
 
         # プッシュメッセージでプレビュー送信
@@ -1221,7 +1774,7 @@ def handle_text_message(event):
             line_api.push_message(
                 PushMessageRequest(
                     to=push_target,
-                    messages=[build_news_confirm_flex(news, session_key)]
+                    messages=[build_news_confirm_flex(news, category)]
                 )
             )
         return
@@ -1229,6 +1782,7 @@ def handle_text_message(event):
     # ─── ニュース再生成 ───
     if text == "ニュース再生成" and state == "news_preview":
         topic = session.get("topic")
+        category = session.get("category", "その他")
         user_sessions[session_key]["state"] = "news_generating"
 
         line_api.reply_message(
@@ -1242,8 +1796,8 @@ def handle_text_message(event):
         user_sessions[session_key] = {
             "state": "news_preview",
             "news": news,
+            "category": category,
             "topic": topic,
-            "images": session.get("images", [])
         }
 
         push_target = get_push_target(event)
@@ -1251,75 +1805,165 @@ def handle_text_message(event):
             line_api.push_message(
                 PushMessageRequest(
                     to=push_target,
-                    messages=[build_news_confirm_flex(news, session_key)]
+                    messages=[build_news_confirm_flex(news, category)]
                 )
             )
         return
 
-    # ─── ニュース確定 ───
-    if text == "ニュース確定" and state == "news_preview":
+    # ─── ニュース保存 ───
+    if text == "ニュース保存" and state == "news_preview":
         news = session.get("news", {})
-        images = session.get("images", [])
+        category = session.get("category", "その他")
+        title = news.get("title", "")
+        body = news.get("body", "")
 
-        # ニュースFlex + 画像を送信
-        messages = [build_news_post_flex(news, images)]
+        # Notionに保存
+        page_id = save_news_to_notion(title, body, category)
 
-        # 画像があれば添付
-        if images and BASE_URL:
-            for img_path in images[:3]:
-                img_url = f"{BASE_URL}/static/images/{os.path.basename(img_path)}"
-                messages.append(ImageMessage(
-                    original_content_url=img_url,
-                    preview_image_url=img_url
-                ))
-
-        line_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=messages[:5]  # LINE制限: 最大5メッセージ
+        if page_id:
+            line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[
+                        TextMessage(text=f"✅ ニュースを保存しました！\n\nタイトル: {title}\nカテゴリ: {category}\n\n「ニュース一覧」で確認できます。"),
+                        build_main_menu_flex()
+                    ]
+                )
             )
-        )
-
-        # 全文をテキストでも送信（Flexだと文字数制限があるため）
-        push_target = get_push_target(event)
-        if push_target:
-            full_text = f"📰 {news.get('title', '')}\n{'─' * 20}\n{news.get('body', '')}\n{'─' * 20}\n🏆 全力エステ"
-            line_api.push_message(
-                PushMessageRequest(
-                    to=push_target,
-                    messages=[TextMessage(text=full_text)]
+        else:
+            line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[
+                        TextMessage(text="⚠️ ニュースの保存に失敗しました。もう一度お試しください。"),
+                        build_main_menu_flex()
+                    ]
                 )
             )
 
         user_sessions.pop(session_key, None)
         return
 
-    # ─── 画像添付コマンド ───
-    if text in ["画像添付", "画像追加"] and state == "news_preview":
-        user_sessions[session_key]["state"] = "news_image_wait"
-        current_count = len(session.get("images", []))
+    # ─── ニュース一覧 ───
+    if text == "ニュース一覧":
+        user_sessions[session_key] = {"state": "news_list"}
+        news_list = fetch_news_from_notion(limit=10)
+        user_sessions[session_key]["news_list"] = news_list
         line_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"🖼 画像を送信してください（最大3枚、現在{current_count}枚）\n\n画像を送信するか、「完了」と入力してプレビューに戻ります。")]
+                messages=[build_news_list_flex(news_list)]
             )
         )
         return
 
-    # ─── 画像添付完了 ───
-    if text == "完了" and state == "news_image_wait":
-        user_sessions[session_key]["state"] = "news_preview"
-        news = session.get("news", {})
-        images = session.get("images", [])
+    # ─── ニュース詳細 ───
+    if text.startswith("ニュース詳細_") and state == "news_list":
+        try:
+            index = int(text.replace("ニュース詳細_", ""))
+            news_list = session.get("news_list", [])
+            if 0 <= index < len(news_list):
+                news = news_list[index]
+                # 全文を送信
+                full_text = f"📰 {news['title']}\n{'─' * 20}\nカテゴリ: {news['category']}\n{'─' * 20}\n{news['body']}\n{'─' * 20}\n🏆 全力エステ"
+                line_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[
+                            TextMessage(text=full_text),
+                            build_news_detail_flex(news)
+                        ]
+                    )
+                )
+            else:
+                line_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="⚠️ ニュースが見つかりませんでした。")]
+                    )
+                )
+        except ValueError:
+            line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="⚠️ 無効な操作です。")]
+                )
+            )
+        return
+
+    # ─── ニュース配信 ───
+    if text == "ニュース配信":
+        user_sessions[session_key] = {"state": "news_delivery"}
+        news_list = fetch_news_from_notion(limit=10)
+        user_sessions[session_key]["news_list"] = news_list
         line_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[
-                    TextMessage(text=f"🖼 画像{len(images)}枚が添付されています。"),
-                    build_news_confirm_flex(news, session_key)
-                ]
+                messages=[build_news_delivery_select_flex(news_list)]
             )
         )
+        return
+
+    # ─── 配信実行 ───
+    if text.startswith("配信実行_") and state == "news_delivery":
+        try:
+            index = int(text.replace("配信実行_", ""))
+            news_list = session.get("news_list", [])
+            if 0 <= index < len(news_list):
+                news = news_list[index]
+                title = news["title"]
+                body = news["body"]
+                page_id = news["id"]
+
+                # ブロードキャスト送信
+                full_text = f"📰 {title}\n{'─' * 20}\n{body}\n{'─' * 20}\n🏆 全力エステ"
+                
+                try:
+                    line_api.broadcast(
+                        BroadcastRequest(
+                            messages=[TextMessage(text=full_text)]
+                        )
+                    )
+                    
+                    # 配信済みにマーク
+                    mark_news_as_delivered(page_id)
+                    
+                    line_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[
+                                TextMessage(text=f"✅ ニュースを配信しました！\n\nタイトル: {title}\n\nすべてのフォロワーに送信されました。"),
+                                build_main_menu_flex()
+                            ]
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Broadcast error: {e}")
+                    line_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[
+                                TextMessage(text="⚠️ ニュースの配信に失敗しました。もう一度お試しください。"),
+                                build_main_menu_flex()
+                            ]
+                        )
+                    )
+            else:
+                line_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="⚠️ ニュースが見つかりませんでした。")]
+                    )
+                )
+        except ValueError:
+            line_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="⚠️ 無効な操作です。")]
+                )
+            )
+        
+        user_sessions.pop(session_key, None)
         return
 
     # ─── スケジュール確認（月選択表示） ───
@@ -1400,7 +2044,9 @@ def handle_text_message(event):
 
 【使い方】
 「メニュー」→ メインメニュー表示
-「ニュース投稿」→ AI自動生成ニュース
+「ニュース作成」→ AI自動生成ニュース
+「ニュース一覧」→ 保存済みニュース確認
+「ニュース配信」→ フォロワーに一斉配信
 「スケジュール確認」→ 月別シフトカレンダー
 「セラピスト一覧」→ 在籍セラピスト
 「店舗情報」→ サロン情報
@@ -1437,74 +2083,6 @@ def get_push_target(event):
         return source.room_id
     else:
         return source.user_id
-
-
-# ═══════════════════════════════════════════
-#  画像メッセージハンドラ
-# ═══════════════════════════════════════════
-
-from linebot.v3.webhooks import ImageMessageContent
-
-@handler.add(MessageEvent, message=ImageMessageContent)
-def handle_image_message(event):
-    """画像メッセージ処理"""
-    session_key = get_session_key(event)
-    session = user_sessions.get(session_key, {})
-    state = session.get("state", "idle")
-    line_api = get_messaging_api()
-
-    if state == "news_image_wait":
-        images = session.get("images", [])
-        if len(images) >= 3:
-            line_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="⚠️ 画像は最大3枚までです。「完了」と入力してプレビューに戻ってください。")]
-                )
-            )
-            return
-
-        # 画像をダウンロード
-        try:
-            from linebot.v3.messaging import MessagingApiBlob
-            blob_api = MessagingApiBlob(ApiClient(configuration))
-            message_content = blob_api.get_message_content(event.message.id)
-
-            filename = f"{uuid.uuid4().hex}.jpg"
-            filepath = os.path.join(UPLOAD_DIR, filename)
-            with open(filepath, "wb") as f:
-                f.write(message_content)
-
-            images.append(filepath)
-            user_sessions[session_key]["images"] = images
-
-            remaining = 3 - len(images)
-            if remaining > 0:
-                msg = f"🖼 画像を受け取りました（{len(images)}/3枚）\nあと{remaining}枚追加できます。\n\n追加する場合は画像を送信、完了する場合は「完了」と入力してください。"
-            else:
-                msg = "🖼 画像を受け取りました（3/3枚）\n最大枚数に達しました。「完了」と入力してプレビューに戻ってください。"
-
-            line_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=msg)]
-                )
-            )
-        except Exception as e:
-            logger.error(f"Image download error: {e}")
-            line_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="⚠️ 画像の保存中にエラーが発生しました。もう一度お試しください。")]
-                )
-            )
-    else:
-        line_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="画像を受け取りましたが、現在画像を受け付ける状態ではありません。\n「メニュー」と入力してメニューを表示してください。")]
-            )
-        )
 
 
 # ═══════════════════════════════════════════
