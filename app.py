@@ -63,10 +63,10 @@ NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "256f9507f0cf8076931fe
 NOTION_NEWS_DATABASE_ID = os.environ.get("NOTION_NEWS_DATABASE_ID", "74dde0685a7a4ee09aeb67e53658e63e")
 
 # X (Twitter) API
-X_API_KEY = os.environ.get("X_API_KEY", "")
-X_API_KEY_SECRET = os.environ.get("X_API_KEY_SECRET", "")
-X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN", "")
-X_ACCESS_TOKEN_SECRET = os.environ.get("X_ACCESS_TOKEN_SECRET", "")
+X_API_KEY = os.environ.get("X_API_KEY", "").strip()
+X_API_KEY_SECRET = os.environ.get("X_API_KEY_SECRET", "").strip()
+X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN", "").strip()
+X_ACCESS_TOKEN_SECRET = os.environ.get("X_ACCESS_TOKEN_SECRET", "").strip()
 
 # ─── Flask ───
 app = Flask(__name__)
@@ -137,10 +137,24 @@ THERAPIST_COLORS = [
 #  X (Twitter) API連携
 # ═══════════════════════════════════════════
 
+# 起動時にX API認証情報の設定状況をログ出力
+logger.info("=== X API credentials check ===")
+logger.info(f"X_API_KEY: {'SET (' + str(len(X_API_KEY)) + ' chars)' if X_API_KEY else 'NOT SET'}")
+logger.info(f"X_API_KEY_SECRET: {'SET (' + str(len(X_API_KEY_SECRET)) + ' chars)' if X_API_KEY_SECRET else 'NOT SET'}")
+logger.info(f"X_ACCESS_TOKEN: {'SET (' + str(len(X_ACCESS_TOKEN)) + ' chars)' if X_ACCESS_TOKEN else 'NOT SET'}")
+logger.info(f"X_ACCESS_TOKEN_SECRET: {'SET (' + str(len(X_ACCESS_TOKEN_SECRET)) + ' chars)' if X_ACCESS_TOKEN_SECRET else 'NOT SET'}")
+logger.info("===============================")
+
+
 def get_x_client():
     """Tweepy Client (API v2) を取得"""
     if not all([X_API_KEY, X_API_KEY_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
-        logger.error("X API credentials are not fully set")
+        missing = []
+        if not X_API_KEY: missing.append("X_API_KEY")
+        if not X_API_KEY_SECRET: missing.append("X_API_KEY_SECRET")
+        if not X_ACCESS_TOKEN: missing.append("X_ACCESS_TOKEN")
+        if not X_ACCESS_TOKEN_SECRET: missing.append("X_ACCESS_TOKEN_SECRET")
+        logger.error(f"X API credentials missing: {', '.join(missing)}")
         return None
     try:
         client = tweepy.Client(
@@ -149,28 +163,53 @@ def get_x_client():
             access_token=X_ACCESS_TOKEN,
             access_token_secret=X_ACCESS_TOKEN_SECRET,
         )
+        logger.info("X client created successfully")
         return client
     except Exception as e:
-        logger.error(f"Failed to create X client: {e}")
+        logger.error(f"Failed to create X client: {e}\n{traceback.format_exc()}")
         return None
 
 
 def post_to_x(text):
     """Xにテキストを投稿する（tweepy + HTTPフォールバック）"""
+    logger.info(f"post_to_x called with text length: {len(text)}")
+
     if not all([X_API_KEY, X_API_KEY_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
-        logger.error("X API credentials are not fully set")
-        return False, "X APIの認証情報が設定されていません。"
+        missing = []
+        if not X_API_KEY: missing.append("X_API_KEY")
+        if not X_API_KEY_SECRET: missing.append("X_API_KEY_SECRET")
+        if not X_ACCESS_TOKEN: missing.append("X_ACCESS_TOKEN")
+        if not X_ACCESS_TOKEN_SECRET: missing.append("X_ACCESS_TOKEN_SECRET")
+        error_detail = f"未設定の環境変数: {', '.join(missing)}"
+        logger.error(f"X API credentials not fully set. {error_detail}")
+        return False, f"X APIの認証情報が設定されていません。\n{error_detail}"
 
     # まずtweepyで試行
     client = get_x_client()
     if client:
         try:
+            logger.info("Attempting to post tweet via tweepy...")
             response = client.create_tweet(text=text)
             tweet_id = response.data["id"]
             logger.info(f"Tweet posted successfully via tweepy: {tweet_id}")
             return True, tweet_id
+        except tweepy.Unauthorized as e:
+            logger.error(f"Tweepy 401 Unauthorized: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response body: {e.response.text[:500]}")
+            logger.info("Falling back to direct HTTP API call...")
+        except tweepy.Forbidden as e:
+            logger.error(f"Tweepy 403 Forbidden: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response body: {e.response.text[:500]}")
+            logger.info("Falling back to direct HTTP API call...")
         except tweepy.TweepyException as e:
             logger.error(f"Tweepy failed to post tweet: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response body: {e.response.text[:500]}")
             logger.info("Falling back to direct HTTP API call...")
         except Exception as e:
             logger.error(f"Unexpected error with tweepy: {e}\n{traceback.format_exc()}")
@@ -179,17 +218,20 @@ def post_to_x(text):
     # フォールバック: OAuth 1.0aで直接HTTP呼び出し
     try:
         from requests_oauthlib import OAuth1
+        logger.info("Attempting direct HTTP API call with OAuth 1.0a...")
         auth = OAuth1(
-            X_API_KEY, X_API_KEY_SECRET,
-            X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
+            X_API_KEY,
+            client_secret=X_API_KEY_SECRET,
+            resource_owner_key=X_ACCESS_TOKEN,
+            resource_owner_secret=X_ACCESS_TOKEN_SECRET,
         )
         resp = http_requests.post(
-            "https://api.twitter.com/2/tweets",
+            "https://api.x.com/2/tweets",
             json={"text": text},
             auth=auth,
             timeout=30
         )
-        logger.info(f"Direct X API response: {resp.status_code} {resp.text}")
+        logger.info(f"Direct X API response: {resp.status_code} {resp.text[:500]}")
         if resp.status_code in (200, 201):
             data = resp.json()
             tweet_id = data.get("data", {}).get("id", "")
@@ -198,7 +240,15 @@ def post_to_x(text):
         else:
             error_msg = resp.text
             logger.error(f"Direct X API failed: {resp.status_code} {error_msg}")
-            return False, f"X APIエラー ({resp.status_code}): {error_msg[:200]}"
+            # ユーザー向けのわかりやすいエラーメッセージ
+            if resp.status_code == 401:
+                return False, "X API認証エラー(401)。API KeyまたはAccess Tokenが無効です。X Developer Portalでトークンを再生成してください。"
+            elif resp.status_code == 403:
+                return False, "X API権限エラー(403)。アプリの権限が不足しています。X Developer Portalで「読み取りと書き込み」権限を設定し、Access Tokenを再生成してください。"
+            elif resp.status_code == 429:
+                return False, "X APIレート制限(429)。しばらく時間をおいてから再試行してください。"
+            else:
+                return False, f"X APIエラー ({resp.status_code}): {error_msg[:200]}"
     except Exception as e:
         logger.error(f"Direct X API call failed: {e}\n{traceback.format_exc()}")
         return False, f"X投稿に失敗しました: {str(e)[:200]}"
@@ -1464,21 +1514,36 @@ def handle_text_message(event):
 
     if text == "X投稿実行" and state == "x_post_confirm":
         post_text = session.get("x_post_text", "")
+        if not post_text:
+            line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
+                TextMessage(text="⚠️ 投稿内容が見つかりません。もう一度やり直してください。"),
+                build_main_menu_flex()
+            ]))
+            user_sessions.pop(session_key, None)
+            return
         line_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[
             TextMessage(text="🐦 Xに投稿中...")
         ]))
-        success, result = post_to_x(post_text)
         push_target = get_push_target(event)
-        if push_target:
-            if success:
-                tweet_url = f"https://x.com/i/status/{result}"
+        try:
+            success, result = post_to_x(post_text)
+            if push_target:
+                if success:
+                    tweet_url = f"https://x.com/i/status/{result}"
+                    line_api.push_message(PushMessageRequest(to=push_target, messages=[
+                        TextMessage(text=f"✅ Xに投稿しました！\n\n🔗 {tweet_url}"),
+                        build_main_menu_flex()
+                    ]))
+                else:
+                    line_api.push_message(PushMessageRequest(to=push_target, messages=[
+                        TextMessage(text=f"❌ X投稿に失敗しました。\n\nエラー: {result}"),
+                        build_main_menu_flex()
+                    ]))
+        except Exception as e:
+            logger.error(f"X post handler error: {e}\n{traceback.format_exc()}")
+            if push_target:
                 line_api.push_message(PushMessageRequest(to=push_target, messages=[
-                    TextMessage(text=f"✅ Xに投稿しました！\n\n🔗 {tweet_url}"),
-                    build_main_menu_flex()
-                ]))
-            else:
-                line_api.push_message(PushMessageRequest(to=push_target, messages=[
-                    TextMessage(text=f"❌ X投稿に失敗しました。\n\nエラー: {result}"),
+                    TextMessage(text=f"❌ X投稿処理中にエラーが発生しました。\n\nエラー: {str(e)[:200]}"),
                     build_main_menu_flex()
                 ]))
         user_sessions.pop(session_key, None)
