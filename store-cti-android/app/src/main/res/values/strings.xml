@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- アプリ表示名の変更はここだけ -->
+    <string name="app_name">店舗CTI</string>
+    <string name="shortcut_intake_short">着信対応</string>
+    <string name="shortcut_intake_long">着信・通話後対応を開く</string>
+    <string name="shortcut_sms_short">クイックSMS</string>
+    <string name="shortcut_sms_long">SMS作成を開く</string>
+</resources>

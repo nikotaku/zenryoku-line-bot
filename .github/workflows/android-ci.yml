@@ -1,0 +1,55 @@
+name: Android CI (store-cti)
+
+on:
+  push:
+    branches: ["claude/store-cti-android-app-qoeanz", "main"]
+    paths:
+      - "store-cti-android/**"
+      - ".github/workflows/android-ci.yml"
+  pull_request:
+    paths:
+      - "store-cti-android/**"
+      - ".github/workflows/android-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: store-cti-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests and debug APK
+        run: ./gradlew :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-cti-debug-apk
+          path: store-cti-android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            store-cti-android/core/build/reports/
+            store-cti-android/app/build/reports/
+          if-no-files-found: ignore
