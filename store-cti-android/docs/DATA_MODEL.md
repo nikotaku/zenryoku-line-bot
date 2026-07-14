@@ -15,12 +15,16 @@ Room データベース名: `store_cti.db` / schema version: 1 / exportSchema: t
 | `syncStatus` | TEXT | `LOCAL_ONLY` / `PENDING` / `SYNCED`(MVPでは常に LOCAL_ONLY) |
 | `version` | INTEGER | 更新のたびに +1(将来の同期競合検出用) |
 
-### 型変換 (TypeConverter)
+### 日時・列挙型の保存形式
 
-- `LocalDate` ↔ TEXT (ISO-8601 `yyyy-MM-dd`) — 日付順ソートが文字列比較で成立
-- `LocalTime` ↔ TEXT (`HH:mm`)
-- `LocalDateTime` ↔ TEXT (ISO-8601) — 範囲検索が文字列比較で成立
-- enum ↔ TEXT (name)
+TypeConverterは使わず、Entityのカラム自体をISO-8601文字列で保持する
+(バックアップJSONとの相互変換を単純化し、シリアライザの二重定義を避けるため)。
+
+- 日付: TEXT `yyyy-MM-dd` — 日付順ソートが文字列比較で成立
+- 時刻: TEXT `HH:mm`
+- 日時: TEXT ISO-8601 (`yyyy-MM-ddTHH:mm`) — 範囲検索が文字列比較で成立
+- enum: TEXT (name)。未知の値は既定値へフォールバック(前方互換)
+- 解析・整形は UI/Repository 層で `java.time` を用いて行う
 
 ### 電話番号の二重保存
 
