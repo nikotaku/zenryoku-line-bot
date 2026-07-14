@@ -11,8 +11,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -70,7 +80,7 @@ fun BigActionButton(
 fun SectionCard(
     title: String,
     modifier: Modifier = Modifier,
-    content: @Composable Column.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     OutlinedCard(modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -194,27 +204,24 @@ fun ConfirmDialog(
 }
 
 /** 全画面共通のScaffold(戻るボタン付きトップバー + Snackbar) */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScreenScaffold(
     title: String,
     onBack: (() -> Unit)? = null,
-    snackbarHostState: androidx.compose.material3.SnackbarHostState? = null,
-    actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+    snackbarHostState: SnackbarHostState? = null,
+    actions: @Composable RowScope.() -> Unit = {},
     bottomBar: @Composable () -> Unit = {},
-    content: @Composable (androidx.compose.foundation.layout.PaddingValues) -> Unit,
+    content: @Composable (PaddingValues) -> Unit,
 ) {
-    androidx.compose.material3.Scaffold(
+    Scaffold(
         topBar = {
-            androidx.compose.material3.TopAppBar(
+            TopAppBar(
                 title = { Text(title) },
                 navigationIcon = {
                     if (onBack != null) {
-                        androidx.compose.material3.IconButton(onClick = onBack) {
-                            Icon(
-                                androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "戻る",
-                            )
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
                         }
                     }
                 },
@@ -223,7 +230,7 @@ fun ScreenScaffold(
         },
         snackbarHost = {
             if (snackbarHostState != null) {
-                androidx.compose.material3.SnackbarHost(snackbarHostState)
+                SnackbarHost(snackbarHostState)
             }
         },
         bottomBar = bottomBar,

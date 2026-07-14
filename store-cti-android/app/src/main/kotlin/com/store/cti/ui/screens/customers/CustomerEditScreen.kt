@@ -258,14 +258,14 @@ fun CustomerEditScreen(
 
 @Composable
 private fun DeleteCustomerButton(onDelete: () -> Unit) {
-    var confirming by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val confirming = remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.material3.OutlinedButton(
-        onClick = { confirming = true },
+        onClick = { confirming.value = true },
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text("この顧客を削除する", color = androidx.compose.material3.MaterialTheme.colorScheme.error)
     }
-    if (confirming) {
+    if (confirming.value) {
         ConfirmDialog(
             title = "顧客を削除しますか?",
             text = "削除しても内部データは論理削除として保持され、完全には消えません。一覧や検索には表示されなくなります。",

@@ -413,7 +413,7 @@ private fun CustomerPickerDialog(
     var query by remember { mutableStateOf("") }
     val filtered = customers.filter {
         query.isBlank() || it.name.contains(query) || it.kana.contains(query) ||
-            it.normalizedPhoneNumber.contains(query.filter { ch -> ch.isDigit() }.ifEmpty { " " })
+            it.normalizedPhoneNumber.contains(query.filter { ch -> ch.isDigit() }.ifEmpty { "#" })
     }
     AlertDialog(
         onDismissRequest = onDismiss,
