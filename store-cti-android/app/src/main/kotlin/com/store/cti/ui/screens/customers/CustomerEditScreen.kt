@@ -272,10 +272,10 @@ private fun DeleteCustomerButton(onDelete: () -> Unit) {
             confirmLabel = "削除する",
             destructive = true,
             onConfirm = {
-                confirming = false
+                confirming.value = false
                 onDelete()
             },
-            onDismiss = { confirming = false },
+            onDismiss = { confirming.value = false },
         )
     }
 }
