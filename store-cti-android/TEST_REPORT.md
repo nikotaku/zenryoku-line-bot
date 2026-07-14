@@ -1,6 +1,10 @@
 # TEST_REPORT.md — 店舗CTI テスト結果・最終動作確認表
 
-最終更新: 2026-07-14(CI結果反映時に更新)
+最終更新: 2026-07-14
+
+**CI結果(コミット 2fb33df / GitHub Actions run 29308343676): ✅ SUCCESS**
+- `:core:test` / `:app:testDebugUnitTest` / `:app:lintDebug` / `:app:assembleDebug` すべて成功
+- 生成アーティファクト: `store-cti-debug-apk`(app-debug.apk)、`reports`(テスト・lintレポート)
 
 ## 1. 単体テスト
 
@@ -19,20 +23,20 @@
 
 | テストクラス | 件数 | 内容 | 結果 |
 |---|---|---|---|
-| BackupRoundTripTest | 3 | JSONラウンドトリップ完全一致、未知キー互換、破損JSON検出 | CIで実行 |
-| EntityLogicTest | 5 | 論理削除、有効絞り込み、顧客区分変更、未知区分互換、折り返し判定 | CIで実行 |
-| DateTimeInputConversionTest | 4 | 入力↔ISO変換、不正日付(2/30等)拒否、うるう年境界 | CIで実行 |
+| BackupRoundTripTest | 3 | JSONラウンドトリップ完全一致、未知キー互換、破損JSON検出 | ✅ CI通過 |
+| EntityLogicTest | 5 | 論理削除、有効絞り込み、顧客区分変更、未知区分互換、折り返し判定 | ✅ CI通過 |
+| DateTimeInputConversionTest | 4 | 入力↔ISO変換、不正日付(2/30等)拒否、うるう年境界 | ✅ CI通過 |
 
-最新のCI結果: GitHub Actions「Android CI (store-cti)」を参照(テストレポートはアーティファクト `reports`)。
+詳細レポートはCIアーティファクト `reports` を参照。
 
 ## 2. ビルド検証
 
 | 項目 | 方法 | 結果 |
 |---|---|---|
 | :core コンパイル+テスト | ローカル(Gradle 8.14/JDK 21)+ CI | ✅ |
-| :app コンパイル(Kotlin/KSP/Hilt/Room) | CI (`:app:assembleDebug`) | CIバッジ参照 |
-| lint | CI (`:app:lintDebug`, abortOnError=false) | レポートをアーティファクトで確認 |
-| debug APK 生成 | CI アーティファクト `store-cti-debug-apk` | CIバッジ参照 |
+| :app コンパイル(Kotlin/KSP/Hilt/Room) | CI (`:app:assembleDebug`) | ✅ |
+| lint | CI (`:app:lintDebug`, abortOnError=false) | ✅ 実行済み(レポートはアーティファクト) |
+| debug APK 生成 | CI アーティファクト `store-cti-debug-apk`(約16MB) | ✅ |
 
 ※ 開発環境からGoogle Maven(dl.google.com)へ到達できないため、AndroidモジュールのビルドはCIで検証している(README「採用した前提」2)。
 
