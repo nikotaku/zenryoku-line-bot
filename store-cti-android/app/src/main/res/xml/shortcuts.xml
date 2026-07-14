@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="intake"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_phone"
+        android:shortcutShortLabel="@string/shortcut_intake_short"
+        android:shortcutLongLabel="@string/shortcut_intake_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="storecti://intake"
+            android:targetPackage="com.store.cti"
+            android:targetClass="com.store.cti.MainActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="quick_sms"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_sms"
+        android:shortcutShortLabel="@string/shortcut_sms_short"
+        android:shortcutLongLabel="@string/shortcut_sms_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="storecti://sms"
+            android:targetPackage="com.store.cti"
+            android:targetClass="com.store.cti.MainActivity" />
+    </shortcut>
+</shortcuts>
