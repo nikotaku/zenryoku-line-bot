@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -25,7 +27,7 @@ android {
     // 鍵ファイルが無い場合、releaseは未署名でビルドされる。
     val keystoreProps = rootProject.file("keystore.properties")
     if (keystoreProps.exists()) {
-        val props = java.util.Properties()
+        val props = Properties()
         keystoreProps.inputStream().use { props.load(it) }
         signingConfigs.create("release") {
             storeFile = rootProject.file(props.getProperty("storeFile"))
